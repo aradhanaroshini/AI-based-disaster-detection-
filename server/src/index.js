@@ -8,6 +8,11 @@ import fs from "fs";
 import fetch from "node-fetch";
 
 dotenv.config();
+// The local setup sometimes stores server credentials in .env2. Load it as a
+// fallback so the API uses the existing MongoDB URI without copying secrets.
+if (!process.env.MONGO_URI && fs.existsSync(path.resolve(".env2"))) {
+  dotenv.config({ path: path.resolve(".env2") });
+}
 
 const app = express();
 const uploadDir = path.resolve("uploads");
@@ -126,6 +131,41 @@ const ReportSchema = new mongoose.Schema({
   createdAt: { type: Date, default: Date.now }
 });
 const Report = mongoose.models.Report || mongoose.model("Report", ReportSchema);
+
+const DonationCampaignSchema = new mongoose.Schema({
+  regionId: { type: String, required: true, index: true },
+  title: { type: String, required: true, maxlength: 90 },
+  description: { type: String, required: true, maxlength: 600 },
+  category: { type: String, required: true },
+  goalAmount: { type: Number, required: true, min: 100, max: 100000000 },
+  createdAt: { type: Date, default: Date.now }
+});
+const DonationCampaign = mongoose.models.DonationCampaign || mongoose.model("DonationCampaign", DonationCampaignSchema);
+
+const DonationPledgeSchema = new mongoose.Schema({
+  campaignId: { type: String, required: true, index: true },
+  amount: { type: Number, required: true, min: 1, max: 10000000 },
+  createdAt: { type: Date, default: Date.now }
+});
+const DonationPledge = mongoose.models.DonationPledge || mongoose.model("DonationPledge", DonationPledgeSchema);
+let memoryCampaigns = [];
+let memoryPledges = [];
+
+function serializeCampaign(campaign, pledgeTotals = {}) {
+  const id = String(campaign._id || campaign.id);
+  const totals = pledgeTotals[id] || { amount: 0, count: 0 };
+  return {
+    id,
+    regionId: campaign.regionId,
+    title: campaign.title,
+    description: campaign.description,
+    category: campaign.category,
+    goalAmount: campaign.goalAmount,
+    raisedAmount: totals.amount,
+    supporterCount: totals.count,
+    createdAt: campaign.createdAt
+  };
+}
 
 async function getHistorical(regionId) {
   if (mongoose.connection.readyState === 1) {
@@ -267,6 +307,81 @@ app.post("/api/reports", upload.single("image"), async (req, res) => {
   res.json(report);
 });
 
+const donationCategories = new Set(["Water & food", "Medical aid", "Shelter", "Transport & rescue", "Other"]);
+
+app.get("/api/donations", async (req, res, next) => {
+  try {
+    const { regionId } = req.query;
+    if (!regions.some(region => region.id === regionId)) return res.status(400).json({ error: "Select a valid district server." });
+
+    const connected = mongoose.connection.readyState === 1;
+    const campaigns = connected
+      ? await DonationCampaign.find({ regionId }).sort({ createdAt: -1 }).limit(50).lean()
+      : memoryCampaigns.filter(campaign => campaign.regionId === regionId).slice(-50).reverse();
+    const ids = campaigns.map(campaign => String(campaign._id || campaign.id));
+    const pledgeRows = connected
+      ? await DonationPledge.aggregate([
+          { $match: { campaignId: { $in: ids } } },
+          { $group: { _id: "$campaignId", amount: { $sum: "$amount" }, count: { $sum: 1 } } }
+        ])
+      : Object.values(memoryPledges.filter(pledge => ids.includes(pledge.campaignId)).reduce((rows, pledge) => {
+          rows[pledge.campaignId] ||= { _id: pledge.campaignId, amount: 0, count: 0 };
+          rows[pledge.campaignId].amount += pledge.amount;
+          rows[pledge.campaignId].count += 1;
+          return rows;
+        }, {}));
+    const totals = Object.fromEntries(pledgeRows.map(row => [row._id, { amount: row.amount, count: row.count }]));
+    res.json({ campaigns: campaigns.map(campaign => serializeCampaign(campaign, totals)), storage: connected ? "mongodb" : "memory" });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/donations", async (req, res, next) => {
+  try {
+    const { regionId, title, description, category, goalAmount } = req.body || {};
+    const cleanTitle = typeof title === "string" ? title.trim() : "";
+    const cleanDescription = typeof description === "string" ? description.trim() : "";
+    const goal = Number(goalAmount);
+    if (!regions.some(region => region.id === regionId)) return res.status(400).json({ error: "Select a valid district server." });
+    if (cleanTitle.length < 4 || cleanTitle.length > 90) return res.status(400).json({ error: "Campaign title must be 4–90 characters." });
+    if (cleanDescription.length < 12 || cleanDescription.length > 600) return res.status(400).json({ error: "Description must be 12–600 characters." });
+    if (!donationCategories.has(category)) return res.status(400).json({ error: "Choose a campaign category." });
+    if (!Number.isFinite(goal) || goal < 100 || goal > 100000000) return res.status(400).json({ error: "Set a target between ₹100 and ₹10 crore." });
+
+    const campaign = { regionId, title: cleanTitle, description: cleanDescription, category, goalAmount: goal, createdAt: new Date() };
+    if (mongoose.connection.readyState === 1) {
+      const saved = await DonationCampaign.create(campaign);
+      return res.status(201).json({ campaign: serializeCampaign(saved) });
+    }
+    campaign.id = `campaign-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    memoryCampaigns.unshift(campaign);
+    res.status(201).json({ campaign: serializeCampaign(campaign) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/donations/:campaignId/pledges", async (req, res, next) => {
+  try {
+    const amount = Number(req.body?.amount);
+    if (!Number.isFinite(amount) || amount < 1 || amount > 10000000) return res.status(400).json({ error: "Enter a pledge between ₹1 and ₹1 crore." });
+
+    const connected = mongoose.connection.readyState === 1;
+    const campaign = connected
+      ? (mongoose.isValidObjectId(req.params.campaignId) ? await DonationCampaign.findById(req.params.campaignId) : null)
+      : memoryCampaigns.find(item => item.id === req.params.campaignId);
+    if (!campaign) return res.status(404).json({ error: "This campaign is no longer available." });
+
+    const pledge = { campaignId: String(campaign._id || campaign.id), amount, createdAt: new Date() };
+    if (connected) await DonationPledge.create(pledge);
+    else memoryPledges.push(pledge);
+    res.status(201).json({ ok: true });
+  } catch (error) {
+    next(error);
+  }
+});
+
 app.use((error, _, res, next) => {
   if (error instanceof multer.MulterError || error.message === "Only image files are supported.") {
     return res.status(400).json({ error: error.code === "LIMIT_FILE_SIZE" ? "Image must be 8 MB or smaller." : error.message });
@@ -387,10 +502,12 @@ Do not invent official evacuation orders, shelter availability, road closures, c
 ${language === "ta" ? "Write every user-facing response field in clear, natural Tamil. Keep riskLevel as the required English enum." : "Write user-facing response fields in clear English."}
 `;
 
+  let aiProviderStatus = process.env.GROQ_API_KEY ? "configured" : "missing";
   try {
     const ai = await groqAgent(prompt, recentImages);
-    if (ai) return res.json({ region, weather, satellite: satelliteUrl(region), historical, ai, generatedBy: "Groq detection + response agents" });
+    if (ai) return res.json({ region, weather, satellite: satelliteUrl(region), historical, ai, generatedBy: "Groq detection + response agents", aiProviderStatus: "connected" });
   } catch (error) {
+    aiProviderStatus = "unavailable";
     console.error(error.message);
   }
 
@@ -404,6 +521,7 @@ ${language === "ta" ? "Write every user-facing response field in clear, natural 
     satellite: satelliteUrl(region),
     historical,
     generatedBy: "Demo fallback",
+    aiProviderStatus,
     ai: {
       riskLevel,
       hazards: rainfall >= 55 ? [{ name: "Heavy rainfall / waterlogging", confidence: 0.64, evidence: "Weather precipitation probability and community reports." }] : [],

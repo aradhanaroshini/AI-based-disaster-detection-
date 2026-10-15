@@ -1,85 +1,47 @@
 # Tamil Nadu AI Disaster Early Detection & Community Response
 
-A MERN-style prototype for region-based disaster monitoring across Tamil Nadu.
+A district-based disaster-monitoring prototype for Tamil Nadu. It combines community reports, weather data and AI-generated decision support with an OpenStreetMap view.
 
-## Core flow
+## Local development
 
-1. User selects a Tamil Nadu region/district.
-2. The regional feed loads community photos and reports.
-3. The Detection Agent combines:
-   - historical observations stored in MongoDB
-   - live weather data
-   - satellite imagery metadata/image
-   - community-uploaded images
-4. The Response Agent generates:
-   - current risk
-   - what to do
-   - what not to do
-   - likely resource requirements
-   - explanation/evidence
-5. The regional feed displays the AI analysis and community reports.
-6. Google Maps displays the selected region and report markers.
-
-## APIs
-
-- Google Maps JavaScript API
-- Google Weather API / Public Alerts
-- NASA GIBS / Worldview satellite imagery
-- Groq API for agentic analysis
-- MongoDB for community reports, historical observations and resource requests
-
-Google's weather public-alert endpoint can provide real-time alert information for a latitude/longitude, including severity, affected areas and safety recommendations.
-NASA GIBS provides standard services for interactive satellite imagery.
-
-## Setup
-
-### 1. Server
+Install the client and server dependencies once:
 
 ```bash
-cd server
-npm install
-cp .env.example .env
+npm install --prefix client
+npm install --prefix server
+```
+
+Add these settings to `server/.env` (the server also accepts the existing `server/.env2` as a local fallback):
+
+```dotenv
+PORT=5001
+MONGO_URI=your_mongodb_connection_string
+GROQ_API_KEY=your_groq_api_key
+GOOGLE_WEATHER_API_KEY=your_google_weather_api_key
+```
+
+Set `client/.env` so the website points to the API:
+
+```dotenv
+VITE_API_BASE_URL=http://localhost:5001
+```
+
+Start both the API and website from the project root:
+
+```bash
 npm run dev
 ```
 
-### 2. Client
+Open `http://localhost:5179`. The root command runs the API and Vite together; press Ctrl+C to stop both.
 
-```bash
-cd client
-npm install
-cp .env.example .env
-npm run dev
-```
+## Features
 
-### Required environment variables
+- District-specific community report feeds and affected-area map markers
+- OpenStreetMap with district selection and hazard filters
+- AI risk analysis and historical incident replays
+- Relief and shelter information
+- District-specific fundraisers, pledge totals and goal progress
 
-Server:
+Fundraising currently records pledges only. It does not collect, hold or transfer money. Campaigns are community-created and are not independently verified by the prototype.
 
-- `MONGO_URI`
-- `GROQ_API_KEY`
-- `GOOGLE_WEATHER_API_KEY`
-- `PORT`
-
-Client:
-
-- `VITE_GOOGLE_MAPS_API_KEY`
-- `VITE_API_BASE_URL`
-
-### Demo mode
-
-If external keys are missing, the UI still works with seeded demo data. Live AI/weather/satellite calls will show as unavailable instead of breaking the dashboard.
-
-## Suggested production architecture
-
-Community image -> moderation -> object/hazard classifier -> Detection Agent
-                                             |
-Historical DB + Weather + Satellite -------+
-                                             |
-                                      Risk Assessment
-                                             |
-                              Response + Resource Agents
-                                             |
-                                      Regional Feed
-
-For a real emergency deployment, AI output must be treated as decision support and verified against authoritative disaster-management alerts.
-# AI-based-disaster-detection-
+The AI and relief information are decision-support/demo features, not official alerts or confirmed live services. Follow authoritative emergency instructions.
